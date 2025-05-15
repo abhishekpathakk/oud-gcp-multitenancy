@@ -150,6 +150,3 @@ This document outlines the step-by-step procedure for restoring the OUD service 
 
 ### Getting Help
 
-For additional assistance, contact the platform team at:
-- Email: platform-team@example.com
-- Slack: #oud-support
