@@ -1,0 +1,15 @@
+apiVersion: v2
+name: oud
+description: A Helm chart for Oracle Unified Directory (OUD) on Kubernetes
+type: application
+version: 0.1.0
+appVersion: "12.2.1.4.0"
+maintainers:
+  - name: Platform Team
+    email: platform-team@example.com
+keywords:
+  - oud
+  - ldap
+  - directory
+  - oracle
+  - multi-tenant

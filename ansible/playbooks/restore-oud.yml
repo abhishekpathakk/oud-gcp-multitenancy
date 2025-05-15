@@ -1,0 +1,80 @@
+---
+# Ansible playbook for restoring OUD data
+- name: Restore OUD data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    backup_file: "{{ backup_file | mandatory }}"  # Must be provided as extra var
+    restore_dir: "/tmp/oud-restore"
+    gcs_bucket: "{{ lookup('env', 'GCS_BUCKET_NAME') }}"
+    oud_namespace: "ldap"
+    oud_service: "oud-oud-headless.{{ oud_namespace }}.svc.cluster.local"
+    oud_ldap_port: "1389"
+    oud_admin_dn: "cn=Directory Manager"
+    
+  tasks:
+    - name: Create local restore directory
+      file:
+        path: "{{ restore_dir }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Download backup from GCS
+      shell: |
+        gsutil cp gs://{{ gcs_bucket }}/backups/{{ backup_file }} {{ restore_dir }}/
+      when: backup_file is match("^oud-backup-.*\.tar\.gz$")
+    
+    - name: Extract backup
+      unarchive:
+        src: "{{ restore_dir }}/{{ backup_file }}"
+        dest: "{{ restore_dir }}"
+        remote_src: yes
+      when: backup_file is match("^oud-backup-.*\.tar\.gz$")
+    
+    - name: Get backup date from filename
+      set_fact:
+        backup_date: "{{ backup_file | regex_replace('^oud-backup-(.+)\\.tar\\.gz$', '\\1') }}"
+      when: backup_file is match("^oud-backup-.*\.tar\.gz$")
+    
+    - name: Get OUD admin password from Secret Manager
+      shell: |
+        gcloud secrets versions access latest --secret=oud-admin-password
+      register: oud_admin_password
+      no_log: true
+    
+    - name: Find LDIF files
+      find:
+        paths: "{{ restore_dir }}/{{ backup_date }}"
+        patterns: "*.ldif"
+      register: ldif_files
+    
+    - name: Restore schema (first)
+      shell: |
+        ldapmodify -h {{ oud_service }} -p {{ oud_ldap_port }} \
+          -D "{{ oud_admin_dn }}" -w "{{ oud_admin_password.stdout }}" \
+          -a -f {{ restore_dir }}/{{ backup_date }}/schema.ldif
+      no_log: true
+      when: restore_dir + '/' + backup_date + '/schema.ldif' in ldif_files.files | map(attribute='path') | list
+    
+    - name: Restore configuration (second)
+      shell: |
+        ldapmodify -h {{ oud_service }} -p {{ oud_ldap_port }} \
+          -D "{{ oud_admin_dn }}" -w "{{ oud_admin_password.stdout }}" \
+          -a -f {{ restore_dir }}/{{ backup_date }}/config.ldif
+      no_log: true
+      when: restore_dir + '/' + backup_date + '/config.ldif' in ldif_files.files | map(attribute='path') | list
+    
+    - name: Restore tenant data
+      shell: |
+        ldapmodify -h {{ oud_service }} -p {{ oud_ldap_port }} \
+          -D "{{ oud_admin_dn }}" -w "{{ oud_admin_password.stdout }}" \
+          -a -f {{ item.path }}
+      loop: "{{ ldif_files.files | selectattr('path', 'not match', '.*/(schema|config)\\.ldif$') | list }}"
+      no_log: true
+    
+    - name: Clean up local restore files
+      file:
+        path: "{{ restore_dir }}"
+        state: absent

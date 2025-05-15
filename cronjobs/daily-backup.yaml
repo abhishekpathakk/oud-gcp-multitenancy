@@ -1,0 +1,103 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oud-daily-backup
+  namespace: ldap
+spec:
+  schedule: "0 1 * * *"  # Daily at 1 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: oud-backup-sa
+          containers:
+          - name: backup
+            image: google/cloud-sdk:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              # Set variables
+              BACKUP_DATE=$(date +%Y%m%d-%H%M%S)
+              BACKUP_DIR="/backup/${BACKUP_DATE}"
+              GCS_BUCKET="${GCS_BUCKET_NAME}"
+              OUD_HOST="${OUD_SERVICE}"
+              OUD_PORT="${OUD_LDAP_PORT}"
+              OUD_ADMIN_DN="${OUD_ROOT_USER_DN}"
+              OUD_ADMIN_PASSWORD="${OUD_ROOT_USER_PASSWORD}"
+              
+              # Create backup directory
+              mkdir -p ${BACKUP_DIR}
+              
+              echo "Starting OUD backup at $(date)"
+              
+              # Backup configuration
+              echo "Backing up OUD configuration..."
+              ldapsearch -h ${OUD_HOST} -p ${OUD_PORT} -D "${OUD_ADMIN_DN}" -w "${OUD_ADMIN_PASSWORD}" \
+                -b "cn=config" -s sub "(objectclass=*)" > ${BACKUP_DIR}/config.ldif
+              
+              # Backup schema
+              echo "Backing up OUD schema..."
+              ldapsearch -h ${OUD_HOST} -p ${OUD_PORT} -D "${OUD_ADMIN_DN}" -w "${OUD_ADMIN_PASSWORD}" \
+                -b "cn=schema" -s sub "(objectclass=*)" > ${BACKUP_DIR}/schema.ldif
+              
+              # Backup each tenant suffix
+              for SUFFIX in ${TENANT_SUFFIXES}; do
+                SUFFIX_NAME=$(echo ${SUFFIX} | sed 's/,/_/g' | sed 's/=/_/g')
+                echo "Backing up suffix ${SUFFIX}..."
+                ldapsearch -h ${OUD_HOST} -p ${OUD_PORT} -D "${OUD_ADMIN_DN}" -w "${OUD_ADMIN_PASSWORD}" \
+                  -b "${SUFFIX}" -s sub "(objectclass=*)" > ${BACKUP_DIR}/${SUFFIX_NAME}.ldif
+              done
+              
+              # Compress backup
+              echo "Compressing backup..."
+              tar -czf /backup/oud-backup-${BACKUP_DATE}.tar.gz -C /backup ${BACKUP_DATE}
+              
+              # Upload to GCS
+              echo "Uploading backup to GCS..."
+              gsutil cp /backup/oud-backup-${BACKUP_DATE}.tar.gz gs://${GCS_BUCKET}/backups/
+              
+              # Clean up local files
+              echo "Cleaning up local files..."
+              rm -rf ${BACKUP_DIR}
+              rm -f /backup/oud-backup-${BACKUP_DATE}.tar.gz
+              
+              # Clean up old backups in GCS (keep last 30 days)
+              echo "Cleaning up old backups in GCS..."
+              gsutil ls -l gs://${GCS_BUCKET}/backups/ | sort -k 2 | head -n -30 | awk '{print $3}' | xargs -r gsutil rm
+              
+              echo "Backup completed successfully at $(date)"
+            env:
+            - name: GCS_BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: oud-backup-config
+                  key: gcs_bucket_name
+            - name: OUD_SERVICE
+              value: "oud-oud-headless.ldap.svc.cluster.local"
+            - name: OUD_LDAP_PORT
+              value: "1389"
+            - name: OUD_ROOT_USER_DN
+              value: "cn=Directory Manager"
+            - name: OUD_ROOT_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oud-admin-password
+                  key: password
+            - name: TENANT_SUFFIXES
+              valueFrom:
+                configMapKeyRef:
+                  name: oud-backup-config
+                  key: tenant_suffixes
+            volumeMounts:
+            - name: backup-volume
+              mountPath: /backup
+          volumes:
+          - name: backup-volume
+            emptyDir: {}
+          restartPolicy: OnFailure

@@ -1,0 +1,91 @@
+---
+# Ansible playbook for enabling replication between OUD instances
+- name: Enable OUD replication
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    oud_namespace: "ldap"
+    oud_service_primary: "oud-oud-0.oud-oud-headless.{{ oud_namespace }}.svc.cluster.local"
+    oud_admin_port: "4444"
+    oud_replication_port: "8989"
+    oud_admin_dn: "cn=Directory Manager"
+    replication_admin: "admin"
+    base_dn: "{{ base_dn | mandatory }}"  # Must be provided as extra var
+    
+  tasks:
+    - name: Get OUD admin password from Secret Manager
+      shell: |
+        gcloud secrets versions access latest --secret=oud-admin-password
+      register: oud_admin_password
+      no_log: true
+    
+    - name: Get OUD replication password from Secret Manager
+      shell: |
+        gcloud secrets versions access latest --secret=oud-replication-password
+      register: oud_replication_password
+      no_log: true
+    
+    - name: Get OUD pod count
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: oud-oud
+        namespace: "{{ oud_namespace }}"
+      register: oud_statefulset
+    
+    - name: Set pod count variable
+      set_fact:
+        pod_count: "{{ oud_statefulset.resources[0].spec.replicas }}"
+    
+    - name: Enable replication between OUD instances
+      shell: |
+        /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/OUD/OUD/bin/dsreplication enable \
+          --host1 {{ oud_service_primary }} \
+          --port1 {{ oud_admin_port }} \
+          --bindDN1 "{{ oud_admin_dn }}" \
+          --bindPassword1 "{{ oud_admin_password.stdout }}" \
+          --replicationPort1 {{ oud_replication_port }} \
+          --host2 oud-oud-{{ item }}.oud-oud-headless.{{ oud_namespace }}.svc.cluster.local \
+          --port2 {{ oud_admin_port }} \
+          --bindDN2 "{{ oud_admin_dn }}" \
+          --bindPassword2 "{{ oud_admin_password.stdout }}" \
+          --replicationPort2 {{ oud_replication_port }} \
+          --adminUID {{ replication_admin }} \
+          --adminPassword "{{ oud_replication_password.stdout }}" \
+          --baseDN "{{ base_dn }}" \
+          --no-prompt \
+          --noPropertiesFile
+      loop: "{{ range(1, pod_count | int) | list }}"
+      no_log: true
+      register: enable_result
+      failed_when: enable_result.rc != 0 and "already in the replication topology" not in enable_result.stderr
+    
+    - name: Initialize replication
+      shell: |
+        /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/OUD/OUD/bin/dsreplication initialize-all \
+          --hostname {{ oud_service_primary }} \
+          --port {{ oud_admin_port }} \
+          --adminUID {{ replication_admin }} \
+          --adminPassword "{{ oud_replication_password.stdout }}" \
+          --baseDN "{{ base_dn }}" \
+          --no-prompt \
+          --noPropertiesFile
+      no_log: true
+    
+    - name: Check replication status
+      shell: |
+        /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/OUD/OUD/bin/dsreplication status \
+          --hostname {{ oud_service_primary }} \
+          --port {{ oud_admin_port }} \
+          --adminUID {{ replication_admin }} \
+          --adminPassword "{{ oud_replication_password.stdout }}" \
+          --no-prompt \
+          --noPropertiesFile
+      register: replication_status
+      no_log: true
+    
+    - name: Display replication status
+      debug:
+        msg: "{{ replication_status.stdout_lines }}"

@@ -1,0 +1,107 @@
+# Default values for OUD Helm chart
+# This is a YAML-formatted file.
+
+# OUD image configuration
+image:
+  repository: oracle/oud
+  tag: 12.2.1.4.0
+  pullPolicy: IfNotPresent
+
+# Number of OUD replicas
+replicaCount: 3
+
+# Service configuration
+service:
+  type: ClusterIP
+  ldapPort: 1389
+  ldapsPort: 1636
+  adminPort: 4444
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 2
+    memory: 4Gi
+  requests:
+    cpu: 1
+    memory: 2Gi
+
+# Storage configuration
+persistence:
+  enabled: true
+  storageClass: "standard"
+  size: 50Gi
+  accessMode: ReadWriteOnce
+
+# NFS configuration for shared storage
+nfs:
+  enabled: true
+  server: "" # Will be populated from Terraform output
+  path: "/oud_data"
+  mountPath: "/shared"
+
+# OUD configuration
+oud:
+  baseDN: "dc=example,dc=com"
+  rootUserDN: "cn=Directory Manager"
+  rootUserPasswordSecretName: "oud-admin-password"
+  rootUserPasswordSecretKey: "password"
+  instanceName: "OUD"
+  ldapPort: 1389
+  ldapsPort: 1636
+  adminPort: 4444
+  replicationPort: 8989
+  
+  # Multi-tenant configuration
+  multiTenant:
+    enabled: true
+    tenants: []
+    # - name: tenant1
+    #   suffix: "dc=tenant1,dc=com"
+    #   adminDN: "cn=admin,dc=tenant1,dc=com"
+    #   passwordSecretName: "tenant1-password"
+    #   passwordSecretKey: "password"
+
+# Backup configuration
+backup:
+  enabled: true
+  schedule: "0 1 * * *" # Daily at 1 AM
+  image: "google/cloud-sdk:latest"
+  bucketName: "" # Will be populated from Terraform output
+  retention: 30
+
+# Replication configuration
+replication:
+  enabled: true
+  passwordSecretName: "oud-replication-password"
+  passwordSecretKey: "password"
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  scrapeInterval: 30s
+
+# Pod security context
+securityContext:
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Pod affinity/anti-affinity
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app
+            operator: In
+            values:
+            - oud
+        topologyKey: kubernetes.io/hostname
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []

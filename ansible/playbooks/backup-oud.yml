@@ -1,0 +1,84 @@
+---
+# Ansible playbook for backing up OUD data
+- name: Backup OUD data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    backup_date: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    backup_dir: "/tmp/oud-backup-{{ backup_date }}"
+    gcs_bucket: "{{ lookup('env', 'GCS_BUCKET_NAME') }}"
+    oud_namespace: "ldap"
+    oud_service: "oud-oud-headless.{{ oud_namespace }}.svc.cluster.local"
+    oud_ldap_port: "1389"
+    oud_admin_dn: "cn=Directory Manager"
+    
+  tasks:
+    - name: Create local backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+      
+    - name: Get OUD admin password from Secret Manager
+      shell: |
+        gcloud secrets versions access latest --secret=oud-admin-password
+      register: oud_admin_password
+      no_log: true
+    
+    - name: Get list of tenant suffixes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: oud-backup-config
+        namespace: "{{ oud_namespace }}"
+      register: config_map
+    
+    - name: Set tenant suffixes variable
+      set_fact:
+        tenant_suffixes: "{{ config_map.resources[0].data.tenant_suffixes.split(' ') }}"
+    
+    - name: Backup OUD configuration
+      shell: |
+        ldapsearch -h {{ oud_service }} -p {{ oud_ldap_port }} \
+          -D "{{ oud_admin_dn }}" -w "{{ oud_admin_password.stdout }}" \
+          -b "cn=config" -s sub "(objectclass=*)" > {{ backup_dir }}/config.ldif
+      no_log: true
+    
+    - name: Backup OUD schema
+      shell: |
+        ldapsearch -h {{ oud_service }} -p {{ oud_ldap_port }} \
+          -D "{{ oud_admin_dn }}" -w "{{ oud_admin_password.stdout }}" \
+          -b "cn=schema" -s sub "(objectclass=*)" > {{ backup_dir }}/schema.ldif
+      no_log: true
+    
+    - name: Backup tenant suffixes
+      shell: |
+        ldapsearch -h {{ oud_service }} -p {{ oud_ldap_port }} \
+          -D "{{ oud_admin_dn }}" -w "{{ oud_admin_password.stdout }}" \
+          -b "{{ item }}" -s sub "(objectclass=*)" > {{ backup_dir }}/{{ item | replace(',', '_') | replace('=', '_') }}.ldif
+      loop: "{{ tenant_suffixes }}"
+      no_log: true
+    
+    - name: Compress backup
+      archive:
+        path: "{{ backup_dir }}"
+        dest: "/tmp/oud-backup-{{ backup_date }}.tar.gz"
+        format: gz
+    
+    - name: Upload backup to GCS
+      shell: |
+        gsutil cp /tmp/oud-backup-{{ backup_date }}.tar.gz gs://{{ gcs_bucket }}/backups/
+    
+    - name: Clean up local backup files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ backup_dir }}"
+        - "/tmp/oud-backup-{{ backup_date }}.tar.gz"
+    
+    - name: Clean up old backups in GCS (keep last 30 days)
+      shell: |
+        gsutil ls -l gs://{{ gcs_bucket }}/backups/ | sort -k 2 | head -n -30 | awk '{print $3}' | xargs -r gsutil rm

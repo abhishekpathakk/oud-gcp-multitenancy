@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-oud-config
+  labels:
+    app: oud
+    release: {{ .Release.Name }}
+data:
+  init-oud.sh: |-
+    #!/bin/bash
+    set -e
+    
+    # Check if OUD is already installed
+    if [ -d "/u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/${OUD_INSTANCE_NAME}" ]; then
+      echo "OUD instance already exists, skipping installation"
+      exit 0
+    fi
+    
+    # Create OUD instance
+    /u01/oracle/oracle_common/bin/oud-setup \
+      --cli \
+      --instancePath /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/${OUD_INSTANCE_NAME} \
+      --baseDN "${OUD_BASE_DN}" \
+      --adminConnectorPort ${OUD_ADMIN_PORT} \
+      --ldapPort ${OUD_LDAP_PORT} \
+      --ldapsPort ${OUD_LDAPS_PORT} \
+      --rootUserDN "${OUD_ROOT_USER_DN}" \
+      --rootUserPassword "${OUD_ROOT_USER_PASSWORD}" \
+      --no-prompt \
+      --noPropertiesFile
+    
+    echo "OUD instance created successfully"
+    
+  setup-replication.sh: |-
+    #!/bin/bash
+    set -e
+    
+    {{- if .Values.replication.enabled }}
+    # Only run on the first pod
+    if [[ "${POD_NAME}" != "{{ .Release.Name }}-oud-0" ]]; then
+      echo "Not the first pod, skipping replication setup"
+      exit 0
+    fi
+    
+    # Get replication password
+    REPLICATION_PASSWORD=$(cat /etc/oud-replication/password)
+    
+    # Setup replication
+    for i in $(seq 1 $(( {{ .Values.replicaCount }} - 1 ))); do
+      REPLICA_HOST="{{ .Release.Name }}-oud-${i}.{{ .Release.Name }}-oud-headless.${POD_NAMESPACE}.svc.cluster.local"
+      
+      echo "Setting up replication with ${REPLICA_HOST}"
+      
+      /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/${OUD_INSTANCE_NAME}/OUD/bin/dsreplication enable \
+        --host1 localhost \
+        --port1 ${OUD_ADMIN_PORT} \
+        --bindDN1 "${OUD_ROOT_USER_DN}" \
+        --bindPassword1 "${OUD_ROOT_USER_PASSWORD}" \
+        --replicationPort1 ${OUD_REPLICATION_PORT} \
+        --host2 ${REPLICA_HOST} \
+        --port2 ${OUD_ADMIN_PORT} \
+        --bindDN2 "${OUD_ROOT_USER_DN}" \
+        --bindPassword2 "${OUD_ROOT_USER_PASSWORD}" \
+        --replicationPort2 ${OUD_REPLICATION_PORT} \
+        --adminUID admin \
+        --adminPassword ${REPLICATION_PASSWORD} \
+        --baseDN "${OUD_BASE_DN}" \
+        --no-prompt \
+        --noPropertiesFile
+    done
+    
+    # Initialize replication
+    /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/${OUD_INSTANCE_NAME}/OUD/bin/dsreplication initialize-all \
+      --hostname localhost \
+      --port ${OUD_ADMIN_PORT} \
+      --adminUID admin \
+      --adminPassword ${REPLICATION_PASSWORD} \
+      --baseDN "${OUD_BASE_DN}" \
+      --no-prompt \
+      --noPropertiesFile
+    
+    echo "Replication setup completed successfully"
+    {{- else }}
+    echo "Replication is disabled, skipping setup"
+    {{- end }}
+    
+  setup-tenants.sh: |-
+    #!/bin/bash
+    set -e
+    
+    {{- if and .Values.multiTenant.enabled .Values.multiTenant.tenants }}
+    # Only run on the first pod
+    if [[ "${POD_NAME}" != "{{ .Release.Name }}-oud-0" ]]; then
+      echo "Not the first pod, skipping tenant setup"
+      exit 0
+    fi
+    
+    {{- range .Values.multiTenant.tenants }}
+    # Setup tenant {{ .name }}
+    echo "Setting up tenant {{ .name }} with suffix {{ .suffix }}"
+    
+    # Get tenant password
+    TENANT_PASSWORD=$(cat /etc/oud-tenants/{{ .name }}/password)
+    
+    # Create suffix
+    /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/${OUD_INSTANCE_NAME}/OUD/bin/ldapmodify \
+      --hostname localhost \
+      --port ${OUD_LDAP_PORT} \
+      --bindDN "${OUD_ROOT_USER_DN}" \
+      --bindPassword "${OUD_ROOT_USER_PASSWORD}" << EOF
+dn: {{ .suffix }}
+objectClass: top
+objectClass: domain
+dc: {{ .name }}
+
+EOF
+    
+    # Create admin user for tenant
+    /u01/oracle/user_projects/domains/base_domain/config/fmwconfig/components/OUD/instances/${OUD_INSTANCE_NAME}/OUD/bin/ldapmodify \
+      --hostname localhost \
+      --port ${OUD_LDAP_PORT} \
+      --bindDN "${OUD_ROOT_USER_DN}" \
+      --bindPassword "${OUD_ROOT_USER_PASSWORD}" << EOF
+dn: {{ .adminDN }}
+objectClass: top
+objectClass: person
+objectClass: organizationalPerson
+objectClass: inetOrgPerson
+cn: admin
+sn: admin
+uid: admin
+userPassword: ${TENANT_PASSWORD}
+
+EOF
+    
+    echo "Tenant {{ .name }} setup completed successfully"
+    {{- end }}
+    {{- else }}
+    echo "Multi-tenant is disabled or no tenants defined, skipping setup"
+    {{- end }}
